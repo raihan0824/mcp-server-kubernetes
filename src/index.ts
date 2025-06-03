@@ -47,6 +47,7 @@ import { kubectlLogs, kubectlLogsSchema } from "./tools/kubectl-logs.js";
 import { kubectlGeneric, kubectlGenericSchema } from "./tools/kubectl-generic.js";
 import { kubectlPatch, kubectlPatchSchema } from "./tools/kubectl-patch.js";
 import { kubectlRollout, kubectlRolloutSchema } from "./tools/kubectl-rollout.js";
+import { kubectlNvidiaSmi, kubectlNvidiaSmiSchema } from "./tools/kubectl-nvidia-smi.js";
 
 // Check if non-destructive tools only mode is enabled
 const nonDestructiveTools =
@@ -64,7 +65,7 @@ const destructiveTools = [
 const allTools = [
   // Core operation tools
   cleanupSchema,
-  
+
   // Unified kubectl-style tools - these replace many specific tools
   kubectlGetSchema,
   kubectlDescribeSchema,
@@ -76,25 +77,26 @@ const allTools = [
   kubectlScaleSchema,
   kubectlPatchSchema,
   kubectlRolloutSchema,
-  
+  kubectlNvidiaSmiSchema,
+
   // Kubernetes context management
   kubectlContextSchema,
-  
+
   // Special operations that aren't covered by simple kubectl commands
   explainResourceSchema,
-  
+
   // Helm operations
   installHelmChartSchema,
   upgradeHelmChartSchema,
   uninstallHelmChartSchema,
-  
+
   // Port forwarding
   PortForwardSchema,
   StopPortForwardSchema,
-  
+
   // API resource operations
   listApiResourcesSchema,
-  
+
   // Generic kubectl command
   kubectlGenericSchema,
 ];
@@ -125,8 +127,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   // Filter out destructive tools if ALLOW_ONLY_NON_DESTRUCTIVE_TOOLS is set to 'true'
   const tools = nonDestructiveTools
     ? allTools.filter(
-        (tool) => !destructiveTools.some((dt) => dt.name === tool.name)
-      )
+      (tool) => !destructiveTools.some((dt) => dt.name === tool.name)
+    )
     : allTools;
 
   return { tools };
@@ -183,7 +185,7 @@ server.setRequestHandler(
           fieldSelector?: string;
         });
       }
-      
+
       if (name === "kubectl_apply") {
         return await kubectlApply(k8sManager, input as {
           manifest?: string;
@@ -193,7 +195,7 @@ server.setRequestHandler(
           force?: boolean;
         });
       }
-      
+
       if (name === "kubectl_delete") {
         return await kubectlDelete(k8sManager, input as {
           resourceType?: string;
@@ -217,7 +219,7 @@ server.setRequestHandler(
           validate?: boolean;
         });
       }
-      
+
       if (name === "kubectl_logs") {
         return await kubectlLogs(k8sManager, input as {
           resourceType: string;
@@ -233,7 +235,7 @@ server.setRequestHandler(
           labelSelector?: string;
         });
       }
-      
+
       if (name === "kubectl_patch") {
         return await kubectlPatch(k8sManager, input as {
           resourceType: string;
@@ -245,7 +247,7 @@ server.setRequestHandler(
           dryRun?: boolean;
         });
       }
-      
+
       if (name === "kubectl_rollout") {
         return await kubectlRollout(k8sManager, input as {
           subCommand: "history" | "pause" | "restart" | "resume" | "status" | "undo";
@@ -258,7 +260,17 @@ server.setRequestHandler(
           watch?: boolean;
         });
       }
-      
+
+      if (name === "kubectl_nvidia_smi") {
+        return await kubectlNvidiaSmi(k8sManager, input as {
+          podName: string;
+          namespace?: string;
+          container?: string;
+          outputFormat?: "json" | "text";
+          queryGpu?: string;
+        });
+      }
+
       if (name === "kubectl_generic") {
         return await kubectlGeneric(k8sManager, input as {
           command: string;
@@ -271,7 +283,7 @@ server.setRequestHandler(
           args?: string[];
         });
       }
-      
+
       if (name === "kubectl_events") {
         return await kubectlGet(k8sManager, {
           resourceType: "events",
@@ -302,7 +314,7 @@ server.setRequestHandler(
             ],
           };
         }
-        
+
         case "explain_resource": {
           return await explainResource(
             input as {
@@ -410,11 +422,11 @@ if (process.env.ENABLE_UNSAFE_SSE_TRANSPORT) {
   console.log(`SSE server started`);
 } else {
   const transport = new StdioServerTransport();
-  
+
   console.error(
     `Starting Kubernetes MCP server v${serverConfig.version}, handling commands...`
   );
-  
+
   server.connect(transport);
 }
 
