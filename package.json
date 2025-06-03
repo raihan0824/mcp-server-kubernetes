@@ -1,13 +1,13 @@
 {
-  "name": "mcp-server-kubernetes",
-  "version": "2.2.1",
-  "description": "MCP server for interacting with Kubernetes clusters via kubectl",
+  "name": "@raihan0824/mcp-server-kubernetes",
+  "version": "2.3.1",
+  "description": "MCP server for interacting with Kubernetes clusters via kubectl with NVIDIA GPU monitoring support",
   "license": "MIT",
   "type": "module",
-  "author": "Flux159",
+  "author": "raihan0824",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Flux159/mcp-server-kubernetes"
+    "url": "https://github.com/raihan0824/mcp-server-kubernetes"
   },
   "bin": {
     "mcp-server-kubernetes": "dist/index.js"
@@ -21,7 +21,7 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "prepublishOnly": "npm run build",
-    "dockerbuild": "docker buildx build -t flux159/mcp-server-kubernetes --platform linux/amd64,linux/arm64 --push .",
+    "dockerbuild": "docker buildx build -t raihan0824/mcp-server-kubernetes --platform linux/amd64,linux/arm64 --push .",
     "chat": "npx mcp-chat --server \"./dist/index.js\""
   },
   "keywords": [
