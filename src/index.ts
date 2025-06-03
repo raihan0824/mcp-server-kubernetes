@@ -48,6 +48,14 @@ import { kubectlGeneric, kubectlGenericSchema } from "./tools/kubectl-generic.js
 import { kubectlPatch, kubectlPatchSchema } from "./tools/kubectl-patch.js";
 import { kubectlRollout, kubectlRolloutSchema } from "./tools/kubectl-rollout.js";
 import { kubectlNvidiaSmi, kubectlNvidiaSmiSchema } from "./tools/kubectl-nvidia-smi.js";
+import {
+  kubectlCurl,
+  kubectlCurlSchema,
+  kubectlPing,
+  kubectlPingSchema,
+  kubectlTraceroute,
+  kubectlTracerouteSchema
+} from "./tools/kubectl-exec.js";
 
 // Check if non-destructive tools only mode is enabled
 const nonDestructiveTools =
@@ -78,6 +86,11 @@ const allTools = [
   kubectlPatchSchema,
   kubectlRolloutSchema,
   kubectlNvidiaSmiSchema,
+
+  // kubectl exec tools for network diagnostics
+  kubectlCurlSchema,
+  kubectlPingSchema,
+  kubectlTracerouteSchema,
 
   // Kubernetes context management
   kubectlContextSchema,
@@ -268,6 +281,44 @@ server.setRequestHandler(
           container?: string;
           outputFormat?: "json" | "text";
           queryGpu?: string;
+        });
+      }
+
+      if (name === "kubectl_curl") {
+        return await kubectlCurl(k8sManager, input as {
+          podName: string;
+          namespace?: string;
+          container?: string;
+          url: string;
+          method?: string;
+          headers?: string[];
+          data?: string;
+          followRedirects?: boolean;
+          timeout?: number;
+          verbose?: boolean;
+        });
+      }
+
+      if (name === "kubectl_ping") {
+        return await kubectlPing(k8sManager, input as {
+          podName: string;
+          namespace?: string;
+          container?: string;
+          target: string;
+          count?: number;
+          interval?: number;
+          timeout?: number;
+        });
+      }
+
+      if (name === "kubectl_traceroute") {
+        return await kubectlTraceroute(k8sManager, input as {
+          podName: string;
+          namespace?: string;
+          container?: string;
+          target: string;
+          maxHops?: number;
+          timeout?: number;
         });
       }
 
