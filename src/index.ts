@@ -170,11 +170,41 @@ server.setRequestHandler(
 
       // Handle kubeconfig management tools
       if (name === "list_kubeconfig_files") {
-        return await listKubeconfigFiles(input as ListKubeconfigFilesInput);
+        try {
+          return await listKubeconfigFiles(input as ListKubeconfigFilesInput);
+        } catch (error: any) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: false,
+                  error: `Failed to list kubeconfig files: ${error.message}`,
+                  tool: "list_kubeconfig_files"
+                }, null, 2)
+              }
+            ]
+          };
+        }
       }
 
       if (name === "switch_kubeconfig") {
-        return await switchKubeconfig(input as SwitchKubeconfigInput);
+        try {
+          return await switchKubeconfig(input as SwitchKubeconfigInput);
+        } catch (error: any) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: false,
+                  error: `Failed to switch kubeconfig: ${error.message}`,
+                  tool: "switch_kubeconfig"
+                }, null, 2)
+              }
+            ]
+          };
+        }
       }
 
       // Handle new kubectl-style commands

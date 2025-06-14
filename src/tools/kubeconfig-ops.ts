@@ -146,33 +146,49 @@ export async function listKubeconfigFiles(input: ListKubeconfigFilesInput) {
         // Read directory contents
         const files = await fs.readdir(kubeconfigDir, { withFileTypes: true });
 
-        // Filter for files only (not directories)
+        // Filter for files only (not directories) and exclude system files
         const configFiles = files
             .filter(dirent => dirent.isFile())
             .map(dirent => dirent.name)
+            .filter(filename => {
+                // Exclude system files and non-kubeconfig files
+                return !filename.startsWith('.') &&
+                    !filename.endsWith('.log') &&
+                    !filename.endsWith('.tmp') &&
+                    !filename.endsWith('.bak');
+            })
             .sort();
 
         // Get file stats and parse kubeconfig for each file
         const fileDetails = await Promise.all(
             configFiles.map(async (filename) => {
                 const filePath = join(kubeconfigDir, filename);
-                const stats = await fs.stat(filePath);
 
-                // Parse kubeconfig to get cluster information
-                const kubeconfigInfo = await parseKubeconfigFile(filePath);
+                try {
+                    const stats = await fs.stat(filePath);
 
-                return {
-                    name: filename,
-                    size: stats.size,
-                    modified: stats.mtime.toISOString(),
-                    isCurrentConfig: filename === 'config',
-                    clusters: kubeconfigInfo.clusters,
-                    currentContext: kubeconfigInfo.currentContext,
-                    currentCluster: kubeconfigInfo.currentCluster,
-                    parseError: kubeconfigInfo.error
-                };
+                    // Parse kubeconfig to get cluster information
+                    const kubeconfigInfo = await parseKubeconfigFile(filePath);
+
+                    return {
+                        name: filename,
+                        size: stats.size,
+                        modified: stats.mtime.toISOString(),
+                        isCurrentConfig: filename === 'config',
+                        clusters: kubeconfigInfo.clusters,
+                        currentContext: kubeconfigInfo.currentContext,
+                        currentCluster: kubeconfigInfo.currentCluster,
+                        parseError: kubeconfigInfo.error
+                    };
+                } catch (error: any) {
+                    // If we can't read the file, skip it
+                    return null;
+                }
             })
         );
+
+        // Filter out null entries (files we couldn't read)
+        const validFileDetails = fileDetails.filter(detail => detail !== null);
 
         return {
             content: [
@@ -181,8 +197,8 @@ export async function listKubeconfigFiles(input: ListKubeconfigFilesInput) {
                     text: JSON.stringify({
                         success: true,
                         directory: kubeconfigDir,
-                        files: fileDetails,
-                        totalFiles: fileDetails.length
+                        files: validFileDetails,
+                        totalFiles: validFileDetails.length
                     }, null, 2)
                 }
             ]
