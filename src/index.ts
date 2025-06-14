@@ -162,11 +162,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(
   CallToolRequestSchema,
   async (request: {
-    params: { name: string; _meta?: any; arguments?: Record<string, any> };
+    params: { name: string; _meta?: any; arguments?: any };
     method: string;
   }) => {
     try {
-      const { name, arguments: input = {} } = request.params;
+      const { name, arguments: rawInput } = request.params;
+
+      // Handle different argument formats that might come from various MCP clients
+      let input: Record<string, any> = {};
+
+      if (rawInput) {
+        if (typeof rawInput === 'string') {
+          // If arguments is a string, try to parse it as JSON
+          try {
+            if (rawInput.trim() === '') {
+              input = {};
+            } else {
+              input = JSON.parse(rawInput);
+            }
+          } catch (parseError) {
+            console.error(`Failed to parse arguments as JSON: ${rawInput}`, parseError);
+            input = {};
+          }
+        } else if (typeof rawInput === 'object') {
+          input = rawInput;
+        }
+      }
 
       // Handle kubeconfig management tools
       if (name === "list_kubeconfig_files") {
