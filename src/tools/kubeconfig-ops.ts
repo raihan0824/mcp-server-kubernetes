@@ -190,6 +190,7 @@ export async function listKubeconfigFiles(input: ListKubeconfigFilesInput) {
         // Filter out null entries (files we couldn't read)
         const validFileDetails = fileDetails.filter(detail => detail !== null);
 
+        // Return the same structure as other tools
         return {
             content: [
                 {
