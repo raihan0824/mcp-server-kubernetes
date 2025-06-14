@@ -56,6 +56,14 @@ import {
   kubectlTraceroute,
   kubectlTracerouteSchema
 } from "./tools/kubectl-exec.js";
+import {
+  listKubeconfigFiles,
+  listKubeconfigFilesSchema,
+  switchKubeconfig,
+  switchKubeconfigSchema,
+  ListKubeconfigFilesInput,
+  SwitchKubeconfigInput
+} from "./tools/kubeconfig-ops.js";
 
 // Check if non-destructive tools only mode is enabled
 const nonDestructiveTools =
@@ -94,6 +102,10 @@ const allTools = [
 
   // Kubernetes context management
   kubectlContextSchema,
+
+  // Kubeconfig management tools
+  listKubeconfigFilesSchema,
+  switchKubeconfigSchema,
 
   // Special operations that aren't covered by simple kubectl commands
   explainResourceSchema,
@@ -155,6 +167,15 @@ server.setRequestHandler(
   }) => {
     try {
       const { name, arguments: input = {} } = request.params;
+
+      // Handle kubeconfig management tools
+      if (name === "list_kubeconfig_files") {
+        return await listKubeconfigFiles(input as ListKubeconfigFilesInput);
+      }
+
+      if (name === "switch_kubeconfig") {
+        return await switchKubeconfig(input as SwitchKubeconfigInput);
+      }
 
       // Handle new kubectl-style commands
       if (name === "kubectl_context") {
