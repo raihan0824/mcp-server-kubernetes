@@ -56,14 +56,6 @@ import {
   kubectlTraceroute,
   kubectlTracerouteSchema
 } from "./tools/kubectl-exec.js";
-import {
-  listKubeconfigFiles,
-  listKubeconfigFilesSchema,
-  switchKubeconfig,
-  switchKubeconfigSchema,
-  ListKubeconfigFilesInput,
-  SwitchKubeconfigInput
-} from "./tools/kubeconfig-ops.js";
 
 // Check if non-destructive tools only mode is enabled
 const nonDestructiveTools =
@@ -102,10 +94,6 @@ const allTools = [
 
   // Kubernetes context management
   kubectlContextSchema,
-
-  // Kubeconfig management tools
-  listKubeconfigFilesSchema,
-  switchKubeconfigSchema,
 
   // Special operations that aren't covered by simple kubectl commands
   explainResourceSchema,
@@ -186,45 +174,6 @@ server.setRequestHandler(
           }
         } else if (typeof rawInput === 'object') {
           input = rawInput;
-        }
-      }
-
-      // Handle kubeconfig management tools
-      if (name === "list_kubeconfig_files") {
-        try {
-          return await listKubeconfigFiles(input as ListKubeconfigFilesInput);
-        } catch (error: any) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  success: false,
-                  error: `Failed to list kubeconfig files: ${error.message}`,
-                  tool: "list_kubeconfig_files"
-                }, null, 2)
-              }
-            ]
-          };
-        }
-      }
-
-      if (name === "switch_kubeconfig") {
-        try {
-          return await switchKubeconfig(input as SwitchKubeconfigInput);
-        } catch (error: any) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  success: false,
-                  error: `Failed to switch kubeconfig: ${error.message}`,
-                  tool: "switch_kubeconfig"
-                }, null, 2)
-              }
-            ]
-          };
         }
       }
 
