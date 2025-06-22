@@ -56,6 +56,9 @@ import {
   kubectlTraceroute,
   kubectlTracerouteSchema
 } from "./tools/kubectl-exec.js";
+import { kubectlNamespaceSearch, kubectlNamespaceSearchSchema } from "./tools/kubectl-namespace-search.js";
+import { kubectlSmartSearch, kubectlSmartSearchSchema } from "./tools/kubectl-smart-search.js";
+import { kubectlClusterOverview, kubectlClusterOverviewSchema } from "./tools/kubectl-cluster-overview.js";
 
 // Check if non-destructive tools only mode is enabled
 const nonDestructiveTools =
@@ -73,6 +76,11 @@ const destructiveTools = [
 const allTools = [
   // Core operation tools
   cleanupSchema,
+
+  // Smart search tools for large clusters
+  kubectlNamespaceSearchSchema,
+  kubectlSmartSearchSchema,
+  kubectlClusterOverviewSchema,
 
   // Unified kubectl-style tools - these replace many specific tools
   kubectlGetSchema,
@@ -175,6 +183,44 @@ server.setRequestHandler(
         } else if (typeof rawInput === 'object') {
           input = rawInput;
         }
+      }
+
+      // Handle new smart search tools
+      if (name === "kubectl_namespace_search") {
+        return await kubectlNamespaceSearch(k8sManager, input as {
+          pattern?: string;
+          excludeSystem?: boolean;
+          status?: string;
+          limit?: number;
+          labelSelector?: string;
+          showLabels?: boolean;
+          sortBy?: string;
+          output?: string;
+        });
+      }
+
+      if (name === "kubectl_smart_search") {
+        return await kubectlSmartSearch(k8sManager, input as {
+          query: string;
+          resourceType?: string;
+          namespacePattern?: string;
+          excludeSystemNamespaces?: boolean;
+          searchMode?: string;
+          limit?: number;
+          output?: string;
+          showNamespaces?: boolean;
+          recent?: boolean;
+        });
+      }
+
+      if (name === "kubectl_cluster_overview") {
+        return await kubectlClusterOverview(k8sManager, input as {
+          includeSystemNamespaces?: boolean;
+          namespacePattern?: string;
+          resourceTypes?: string[];
+          showTop?: number;
+          showDetails?: boolean;
+        });
       }
 
       // Handle new kubectl-style commands

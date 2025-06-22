@@ -9,20 +9,20 @@ export const kubectlListSchema = {
   inputSchema: {
     type: "object",
     properties: {
-      resourceType: { 
-        type: "string", 
-        description: "Type of resource to list (e.g., pods, deployments, services, configmaps, etc.)" 
+      resourceType: {
+        type: "string",
+        description: "Type of resource to list (e.g., pods, deployments, services, configmaps, etc.)"
       },
-      namespace: { 
-        type: "string", 
-        description: "Namespace of the resources (optional - defaults to 'default' for namespaced resources)", 
-        default: "default" 
+      namespace: {
+        type: "string",
+        description: "Namespace of the resources (optional - defaults to 'default' for namespaced resources)",
+        default: "default"
       },
-      output: { 
-        type: "string", 
+      output: {
+        type: "string",
         enum: ["json", "yaml", "wide", "name", "custom", "formatted"],
         description: "Output format - 'formatted' uses a resource-specific format with key information",
-        default: "formatted" 
+        default: "formatted"
       },
       allNamespaces: {
         type: "boolean",
@@ -37,6 +37,16 @@ export const kubectlListSchema = {
       fieldSelector: {
         type: "string",
         description: "Filter resources by field selector (e.g. 'metadata.name=my-pod')",
+        optional: true
+      },
+      limit: {
+        type: "number",
+        description: "Limit the number of results returned (helpful for large clusters)",
+        optional: true
+      },
+      sortBy: {
+        type: "string",
+        description: "Sort by field (e.g. 'metadata.name', 'metadata.creationTimestamp')",
         optional: true
       }
     },
@@ -53,6 +63,8 @@ export async function kubectlList(
     allNamespaces?: boolean;
     labelSelector?: string;
     fieldSelector?: string;
+    limit?: number;
+    sortBy?: string;
   }
 ) {
   try {
@@ -62,7 +74,9 @@ export async function kubectlList(
     const allNamespaces = input.allNamespaces || false;
     const labelSelector = input.labelSelector || "";
     const fieldSelector = input.fieldSelector || "";
-    
+    const limit = input.limit;
+    const sortBy = input.sortBy || "";
+
     // If not using formatted output, delegate to kubectl_get
     if (output !== "formatted") {
       return await kubectlGet(k8sManager, {
@@ -74,114 +88,136 @@ export async function kubectlList(
         fieldSelector: input.fieldSelector
       });
     }
-    
+
     // For formatted output, we'll use resource-specific custom columns
     let customColumns = "";
-    
+
     switch (resourceType) {
       case "pods":
       case "pod":
       case "po":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,STATUS:.status.phase,NODE:.spec.nodeName,IP:.status.podIP,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "deployments":
       case "deployment":
       case "deploy":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,READY:.status.readyReplicas/.status.replicas,UP-TO-DATE:.status.updatedReplicas,AVAILABLE:.status.availableReplicas,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "services":
       case "service":
       case "svc":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,TYPE:.spec.type,CLUSTER-IP:.spec.clusterIP,EXTERNAL-IP:.status.loadBalancer.ingress[0].ip,PORTS:.spec.ports[*].port,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "nodes":
       case "node":
       case "no":
         customColumns = "NAME:.metadata.name,STATUS:.status.conditions[?(@.type==\"Ready\")].status,ROLES:.metadata.labels.kubernetes\\.io/role,VERSION:.status.nodeInfo.kubeletVersion,INTERNAL-IP:.status.addresses[?(@.type==\"InternalIP\")].address,OS-IMAGE:.status.nodeInfo.osImage,KERNEL-VERSION:.status.nodeInfo.kernelVersion,CONTAINER-RUNTIME:.status.nodeInfo.containerRuntimeVersion";
         break;
-        
+
       case "namespaces":
       case "namespace":
       case "ns":
         customColumns = "NAME:.metadata.name,STATUS:.status.phase,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "persistentvolumes":
       case "pv":
         customColumns = "NAME:.metadata.name,CAPACITY:.spec.capacity.storage,ACCESS_MODES:.spec.accessModes,RECLAIM_POLICY:.spec.persistentVolumeReclaimPolicy,STATUS:.status.phase,CLAIM:.spec.claimRef.name,STORAGECLASS:.spec.storageClassName,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "persistentvolumeclaims":
       case "pvc":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,STATUS:.status.phase,VOLUME:.spec.volumeName,CAPACITY:.status.capacity.storage,ACCESS_MODES:.spec.accessModes,STORAGECLASS:.spec.storageClassName,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "configmaps":
       case "configmap":
       case "cm":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,DATA:.data,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "secrets":
       case "secret":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,TYPE:.type,DATA:.data,AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "jobs":
       case "job":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,COMPLETIONS:.status.succeeded/.spec.completions,DURATION:.status.completionTime-(.status.startTime),AGE:.metadata.creationTimestamp";
         break;
-        
+
       case "cronjobs":
       case "cronjob":
       case "cj":
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,SCHEDULE:.spec.schedule,SUSPEND:.spec.suspend,ACTIVE:.status.active,LAST_SCHEDULE:.status.lastScheduleTime,AGE:.metadata.creationTimestamp";
         break;
-        
+
       default:
         // For unknown resource types, fall back to a generic format
         customColumns = "NAME:.metadata.name,NAMESPACE:.metadata.namespace,KIND:.kind,AGE:.metadata.creationTimestamp";
         break;
     }
-    
+
     // Build the kubectl command
     let command = "kubectl get ";
-    
+
     // Add resource type
     command += resourceType;
-    
+
     // Add namespace flag unless all namespaces is specified
     if (allNamespaces) {
       command += " --all-namespaces";
     } else if (namespace && !isNonNamespacedResource(resourceType)) {
       command += ` -n ${namespace}`;
     }
-    
+
     // Add label selector if provided
     if (labelSelector) {
       command += ` -l ${labelSelector}`;
     }
-    
+
     // Add field selector if provided
     if (fieldSelector) {
       command += ` --field-selector=${fieldSelector}`;
     }
-    
+
+    // Add sort-by if provided
+    if (sortBy) {
+      command += ` --sort-by=${sortBy}`;
+    }
+
     // Add custom columns format
     command += ` -o custom-columns="${customColumns}"`;
-    
+
     // Execute the command
     try {
       const result = execSync(command, { encoding: "utf8" });
-      
+
+      // Apply limit if specified and output is not JSON/YAML
+      let finalResult = result;
+      if (limit && limit > 0 && output === "formatted") {
+        const lines = result.trim().split('\n');
+        if (lines.length > 1) { // Keep header
+          const header = lines[0];
+          const dataLines = lines.slice(1);
+          const limitedLines = dataLines.slice(0, limit);
+          finalResult = [header, ...limitedLines].join('\n');
+
+          // Add summary if we limited the results
+          if (dataLines.length > limit) {
+            finalResult += `\n\n... showing ${limit} of ${dataLines.length} results (use limit parameter to see more)`;
+          }
+        }
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: result,
+            text: finalResult,
           },
         ],
       };
@@ -204,7 +240,7 @@ export async function kubectlList(
           isError: true,
         };
       }
-      
+
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to list resources: ${error.message}`
@@ -229,6 +265,6 @@ function isNonNamespacedResource(resourceType: string): boolean {
     "clusterrolebindings",
     "customresourcedefinitions", "crd", "crds"
   ];
-  
+
   return nonNamespacedResources.includes(resourceType.toLowerCase());
 } 
