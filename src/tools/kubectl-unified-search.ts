@@ -1,6 +1,9 @@
 import { KubernetesManager } from "../types.js";
-import { execSync } from "child_process";
+import { exec, execSync } from "child_process";
+import { promisify } from "util";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+
+const execAsync = promisify(exec);
 
 export const kubectlUnifiedSearchSchema = {
     name: "kubectl_search",
@@ -118,84 +121,65 @@ export async function kubectlUnifiedSearch(
         recent?: boolean;
     }
 ) {
+    // Early validation
+    if (!input.query || input.query.trim().length === 0) {
+        throw new Error("Search query cannot be empty");
+    }
+
+    const {
+        query,
+        resourceTypes = ["pods", "deployments", "services"],
+        namespaces,
+        namespacePattern,
+        excludeSystemNamespaces = false,
+        searchMode = "auto",
+        fuzzyTolerance = "moderate",
+        limit = 20,
+        includeLabels = true,
+        includeAnnotations = false,
+        sortBy = "relevance",
+        output = "detailed",
+        recent = false
+    } = input;
+
     try {
-        const {
-            query,
-            resourceTypes = ["pods", "deployments", "services"],
+        // Get all target namespaces - no limit needed with batching approach
+        const targetNamespaces = await getTargetNamespaces(
             namespaces,
             namespacePattern,
-            excludeSystemNamespaces = false,
-            searchMode = "auto",
-            fuzzyTolerance = "moderate",
-            limit = 20,
-            includeLabels = true,
-            includeAnnotations = false,
-            sortBy = "relevance",
-            output = "detailed",
-            recent = false
-        } = input;
+            excludeSystemNamespaces,
+            query,
+            undefined // No limit - process all namespaces in batches
+        );
+
+        if (targetNamespaces.length === 0) {
+            return formatSearchResults([], output, query, "No namespaces to search");
+        }
 
         // Determine search strategy
         const strategy = determineSearchStrategy(query, searchMode);
         const searchConfig = getFuzzyConfig(fuzzyTolerance);
 
-        // Get target namespaces
-        const targetNamespaces = await getTargetNamespaces(
-            namespaces,
-            namespacePattern,
-            excludeSystemNamespaces
+        // Use streaming search for better performance
+        const results = await streamingSearch(
+            resourceTypes,
+            targetNamespaces,
+            query,
+            strategy,
+            searchConfig,
+            includeLabels,
+            includeAnnotations,
+            recent,
+            limit
         );
 
-        // Handle namespace-only search
-        if (resourceTypes.includes("namespaces")) {
-            const namespaceResults = await searchNamespaces(
-                query,
-                targetNamespaces,
-                strategy,
-                searchConfig
-            );
+        // Sort results
+        const sortedResults = sortResults(results, sortBy);
 
-            if (resourceTypes.length === 1) {
-                return formatSearchResults(namespaceResults, output, query, "namespaces");
-            }
-        }
-
-        // Search all resource types
-        const allResults: SearchResult[] = [];
-
-        for (const resourceType of resourceTypes.filter(rt => rt !== "namespaces")) {
-            for (const namespace of targetNamespaces) {
-                try {
-                    const resources = await getResourcesFromNamespace(resourceType, namespace, recent);
-                    const matches = await searchResourcesWithStrategy(
-                        resources,
-                        resourceType,
-                        namespace,
-                        query,
-                        strategy,
-                        searchConfig,
-                        includeLabels,
-                        includeAnnotations
-                    );
-                    allResults.push(...matches);
-                } catch (error) {
-                    // Continue with other namespaces if one fails
-                    console.error(`Error searching ${resourceType} in ${namespace}:`, error);
-                }
-            }
-        }
-
-        // Sort and limit results
-        const sortedResults = sortResults(allResults, sortBy);
-        const limitedResults = sortedResults.slice(0, limit);
-
-        return formatSearchResults(limitedResults, output, query, "resources");
+        return formatSearchResults(sortedResults, output, query, strategy.type);
 
     } catch (error: any) {
-        throw new McpError(
-            ErrorCode.InternalError,
-            `Search failed: ${error.message}`
-        );
+        throw new Error(`Search failed: ${error.message}`);
     }
 }
 
@@ -239,17 +223,22 @@ function getFuzzyConfig(tolerance: string): SearchConfig {
 async function getTargetNamespaces(
     namespaces?: string[],
     namespacePattern?: string,
-    excludeSystemNamespaces: boolean = false
+    excludeSystemNamespaces: boolean = false,
+    query?: string,
+    maxNamespaces?: number // Optional limit - undefined means no limit
 ): Promise<string[]> {
     if (namespaces && namespaces.length > 0) {
-        return namespaces;
+        return maxNamespaces ? namespaces.slice(0, maxNamespaces) : namespaces;
     }
 
     try {
         const command = "kubectl get namespaces -o name";
-        const result = execSync(command, { encoding: "utf8" });
+        const { stdout } = await execAsync(command, {
+            timeout: 5000,
+            maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
+        });
 
-        let allNamespaces = result.trim()
+        let allNamespaces = stdout.trim()
             .split('\n')
             .map(line => line.replace('namespace/', ''))
             .filter(ns => ns.trim());
@@ -282,7 +271,8 @@ async function getTargetNamespaces(
             allNamespaces = allNamespaces.filter(ns => regex.test(ns));
         }
 
-        return allNamespaces;
+        // Apply limit only if specified
+        return maxNamespaces ? allNamespaces.slice(0, maxNamespaces) : allNamespaces;
     } catch (error) {
         throw new Error(`Failed to get namespaces: ${error}`);
     }
@@ -378,18 +368,259 @@ async function getResourcesFromNamespace(
 
         command += " -o json";
 
-        const result = execSync(command, { encoding: "utf8" });
-        const jsonResult = JSON.parse(result);
+        const { stdout } = await execAsync(command, {
+            timeout: 10000,
+            maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
+        });
+        const jsonResult = JSON.parse(stdout);
         return jsonResult.items || [];
     } catch (error: any) {
-        if (error.status === 1 && error.stderr?.includes('No resources found')) {
+        if (error.code === 1 && error.stderr?.includes('No resources found')) {
             return [];
         }
-        throw error;
+        return [];
     }
 }
 
-async function searchResourcesWithStrategy(
+function getResourceAge(creationTimestamp: string): string {
+    const created = new Date(creationTimestamp);
+    const now = new Date();
+    const diffMs = now.getTime() - created.getTime();
+
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+
+    if (diffDays > 0) return `${diffDays}d`;
+    if (diffHours > 0) return `${diffHours}h`;
+    return `${diffMinutes}m`;
+}
+
+function getResourceStatus(resource: any): string {
+    if (resource.status?.phase) return resource.status.phase;
+    if (resource.status?.conditions) {
+        const readyCondition = resource.status.conditions.find((c: any) => c.type === 'Ready');
+        if (readyCondition) return readyCondition.status === 'True' ? 'Ready' : 'NotReady';
+    }
+    if (resource.spec?.replicas !== undefined && resource.status?.readyReplicas !== undefined) {
+        return `${resource.status.readyReplicas}/${resource.spec.replicas}`;
+    }
+    return 'Unknown';
+}
+
+function prioritizeNamespaces(namespaces: string[], query: string): string[] {
+    const queryLower = query.toLowerCase();
+    const prioritized: string[] = [];
+    const regular: string[] = [];
+
+    for (const namespace of namespaces) {
+        const namespaceLower = namespace.toLowerCase();
+
+        // High priority: namespace contains query term
+        if (namespaceLower.includes(queryLower)) {
+            prioritized.push(namespace);
+        }
+        // Medium priority: namespace contains common patterns related to query
+        else if (
+            (queryLower.includes('dev') && namespaceLower.includes('dev')) ||
+            (queryLower.includes('prod') && namespaceLower.includes('prod')) ||
+            (queryLower.includes('test') && namespaceLower.includes('test')) ||
+            (queryLower.includes('demo') && namespaceLower.includes('demo'))
+        ) {
+            prioritized.push(namespace);
+        }
+        else {
+            regular.push(namespace);
+        }
+    }
+
+    return [...prioritized, ...regular];
+}
+
+async function streamingSearch(
+    resourceTypes: string[],
+    namespaces: string[],
+    query: string,
+    strategy: { type: string; selector: string },
+    searchConfig: SearchConfig,
+    includeLabels: boolean,
+    includeAnnotations: boolean,
+    recent: boolean,
+    limit: number
+): Promise<SearchResult[]> {
+    const results: SearchResult[] = [];
+    const queryLower = query.toLowerCase();
+    const batchSize = 50; // Process 50 namespaces per batch
+
+    // Prioritize namespaces that might contain relevant resources
+    const prioritizedNamespaces = prioritizeNamespaces(namespaces, query);
+
+    // Quick pre-filter: if query is very specific, prioritize certain resource types
+    const prioritizedResourceTypes = prioritizeResourceTypes(resourceTypes, query);
+
+    for (const resourceType of prioritizedResourceTypes) {
+        if (results.length >= limit) break;
+
+        // Process namespaces in batches for better performance
+        for (let i = 0; i < prioritizedNamespaces.length; i += batchSize) {
+            if (results.length >= limit) break;
+
+            const batch = prioritizedNamespaces.slice(i, i + batchSize);
+
+            // Process this batch in parallel
+            const batchPromises = batch.map(async (namespace) => {
+                try {
+                    const resources = await getResourcesWithPreFilter(resourceType, namespace);
+                    if (resources.length === 0) return [];
+
+                    // Quick scan for obvious matches first
+                    const quickMatches = await quickScanResources(
+                        resources,
+                        resourceType,
+                        namespace,
+                        queryLower,
+                        Math.min(10, limit - results.length) // Limit per namespace
+                    );
+
+                    const namespaceResults = [...quickMatches];
+
+                    // If we don't have enough results, do deeper search on remaining resources
+                    if (namespaceResults.length < 5 && quickMatches.length < resources.length) {
+                        const remainingResources = resources.filter(r =>
+                            !quickMatches.some(qm => qm.resource.metadata.name === r.metadata.name)
+                        );
+
+                        const deepMatches = await deepSearchResources(
+                            remainingResources,
+                            resourceType,
+                            namespace,
+                            query,
+                            strategy,
+                            searchConfig,
+                            includeLabels,
+                            includeAnnotations,
+                            Math.min(3, limit - results.length - namespaceResults.length)
+                        );
+
+                        namespaceResults.push(...deepMatches);
+                    }
+
+                    return namespaceResults;
+                } catch (error) {
+                    // Continue with next namespace
+                    return [];
+                }
+            });
+
+            // Wait for all namespaces in this batch to complete
+            const batchResults = await Promise.all(batchPromises);
+
+            // Flatten and add results
+            for (const namespaceResults of batchResults) {
+                results.push(...namespaceResults);
+                if (results.length >= limit) break;
+            }
+
+            // Early exit if we have enough results - don't process more batches
+            if (results.length >= limit) break;
+        }
+
+        // Early exit if we have enough results - don't process more resource types
+        if (results.length >= limit) break;
+    }
+
+    return results.slice(0, limit);
+}
+
+function prioritizeResourceTypes(resourceTypes: string[], query: string): string[] {
+    const queryLower = query.toLowerCase();
+    const priority: { [key: string]: number } = {};
+
+    // Default priorities
+    resourceTypes.forEach((rt, index) => {
+        priority[rt] = index;
+    });
+
+    // Boost priority based on query hints
+    if (queryLower.includes('pod') || queryLower.includes('container')) {
+        priority['pods'] = -10;
+    }
+    if (queryLower.includes('service') || queryLower.includes('svc')) {
+        priority['services'] = -9;
+    }
+    if (queryLower.includes('deploy') || queryLower.includes('app')) {
+        priority['deployments'] = -8;
+    }
+    if (queryLower.includes('job')) {
+        priority['jobs'] = -7;
+        priority['cronjobs'] = -6;
+    }
+
+    return resourceTypes.sort((a, b) => priority[a] - priority[b]);
+}
+
+async function getResourcesWithPreFilter(
+    resourceType: string,
+    namespace: string,
+    labelSelector?: string,
+    fieldSelector?: string
+): Promise<any[]> {
+    try {
+        let command = `kubectl get ${resourceType} -n ${namespace} -o json`;
+
+        if (labelSelector) {
+            command += ` -l "${labelSelector}"`;
+        }
+
+        if (fieldSelector) {
+            command += ` --field-selector="${fieldSelector}"`;
+        }
+
+        const { stdout } = await execAsync(command, {
+            timeout: 10000,
+            maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
+        });
+
+        const parsed = JSON.parse(stdout);
+        const items = parsed.items || [];
+
+        return items;
+    } catch (error: any) {
+        return [];
+    }
+}
+
+async function quickScanResources(
+    resources: any[],
+    resourceType: string,
+    namespace: string,
+    queryLower: string,
+    maxResults: number
+): Promise<SearchResult[]> {
+    const results: SearchResult[] = [];
+
+    for (const resource of resources) {
+        if (results.length >= maxResults) break;
+
+        const resourceName = resource.metadata.name.toLowerCase();
+
+        // Only exact substring matches in quick scan
+        if (resourceName.includes(queryLower)) {
+            results.push({
+                resource,
+                resourceType,
+                namespace,
+                matchScore: 1.0,
+                matchReason: "exact substring match in name",
+                levenshteinDistance: 0
+            });
+        }
+    }
+
+    return results;
+}
+
+async function deepSearchResources(
     resources: any[],
     resourceType: string,
     namespace: string,
@@ -397,12 +628,15 @@ async function searchResourcesWithStrategy(
     strategy: { type: string; selector: string },
     searchConfig: SearchConfig,
     includeLabels: boolean,
-    includeAnnotations: boolean
+    includeAnnotations: boolean,
+    maxResults: number
 ): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
     const queryLower = query.toLowerCase();
 
     for (const resource of resources) {
+        if (results.length >= maxResults) break;
+
         const resourceName = resource.metadata.name.toLowerCase();
         const matches = [];
 
@@ -422,7 +656,7 @@ async function searchResourcesWithStrategy(
                 }
             }
         } else if (strategy.type === 'fields') {
-            // Field selector search (simplified)
+            // Field selector search
             const fieldValue = getFieldValue(resource, strategy.selector);
             if (fieldValue && fieldValue.toString().toLowerCase().includes(queryLower)) {
                 matches.push({
@@ -449,63 +683,32 @@ async function searchResourcesWithStrategy(
                 });
             }
         } else {
-            // Fuzzy matching (default)
+            // Fuzzy matching with optimizations
 
-            // 1. Exact substring match (highest priority)
-            if (resourceName.includes(queryLower)) {
-                matches.push({
-                    score: 1.0,
-                    reason: "exact substring match in name",
-                    distance: 0
-                });
-            }
-
-            // 2. Levenshtein distance match
-            const distance = levenshteinDistance(queryLower, resourceName);
-            if (distance <= searchConfig.maxDistance) {
-                const score = 1 - (distance / Math.max(queryLower.length, resourceName.length));
-                if (score >= searchConfig.minScore) {
-                    matches.push({
-                        score: score * 0.9, // Slightly lower than exact match
-                        reason: `fuzzy name match (distance: ${distance})`,
-                        distance: distance
-                    });
-                }
-            }
-
-            // 3. Word boundary matches
-            const words = resourceName.split(/[-_\s]/);
-            for (const word of words) {
-                if (word.includes(queryLower)) {
-                    matches.push({
-                        score: 0.8,
-                        reason: "word boundary match in name",
-                        distance: 0
-                    });
-                    break;
-                }
-            }
-
-            // 4. Acronym match
-            if (words.length > 1) {
-                const acronym = words.map((w: string) => w[0]).join('');
-                if (acronym.includes(queryLower)) {
-                    matches.push({
-                        score: 0.6,
-                        reason: "acronym match",
-                        distance: 0
-                    });
-                }
-            }
-
-            // 5. Label matching
-            if (includeLabels && resource.metadata.labels) {
-                for (const [key, value] of Object.entries(resource.metadata.labels)) {
-                    const labelText = `${key}=${value}`.toLowerCase();
-                    if (labelText.includes(queryLower)) {
+            // Quick length check for Levenshtein
+            const lengthDiff = Math.abs(queryLower.length - resourceName.length);
+            if (lengthDiff <= searchConfig.maxDistance) {
+                const distance = levenshteinDistance(queryLower, resourceName);
+                if (distance <= searchConfig.maxDistance) {
+                    const score = 1 - (distance / Math.max(queryLower.length, resourceName.length));
+                    if (score >= searchConfig.minScore) {
                         matches.push({
-                            score: 0.7,
-                            reason: `label match (${key}=${value})`,
+                            score: score * 0.9,
+                            reason: `fuzzy name match (distance: ${distance})`,
+                            distance: distance
+                        });
+                    }
+                }
+            }
+
+            // Word boundary matches
+            if (matches.length === 0 && (resourceName.includes('-') || resourceName.includes('_'))) {
+                const words = resourceName.split(/[-_\s]/);
+                for (const word of words) {
+                    if (word.includes(queryLower)) {
+                        matches.push({
+                            score: 0.8,
+                            reason: "word boundary match in name",
                             distance: 0
                         });
                         break;
@@ -513,14 +716,29 @@ async function searchResourcesWithStrategy(
                 }
             }
 
-            // 6. Annotation matching
-            if (includeAnnotations && resource.metadata.annotations) {
-                for (const [key, value] of Object.entries(resource.metadata.annotations)) {
-                    const annotationText = `${key}=${value}`.toLowerCase();
-                    if (annotationText.includes(queryLower)) {
+            // Acronym match - only for short queries
+            if (matches.length === 0 && resourceName.includes('-') && queryLower.length <= 4) {
+                const words = resourceName.split('-');
+                if (words.length > 1) {
+                    const acronym = words.map((w: string) => w[0]).join('');
+                    if (acronym.includes(queryLower)) {
                         matches.push({
-                            score: 0.5,
-                            reason: `annotation match (${key}=${value})`,
+                            score: 0.6,
+                            reason: "acronym match",
+                            distance: 0
+                        });
+                    }
+                }
+            }
+
+            // Label matching - only if enabled and no name matches
+            if (matches.length === 0 && includeLabels && resource.metadata.labels) {
+                for (const [key, value] of Object.entries(resource.metadata.labels)) {
+                    const labelText = `${key}=${value}`.toLowerCase();
+                    if (labelText.includes(queryLower)) {
+                        matches.push({
+                            score: 0.7,
+                            reason: `label match (${key}=${value})`,
                             distance: 0
                         });
                         break;
@@ -700,30 +918,4 @@ function formatSearchResults(
             },
         ],
     };
-}
-
-function getResourceAge(creationTimestamp: string): string {
-    const created = new Date(creationTimestamp);
-    const now = new Date();
-    const diffMs = now.getTime() - created.getTime();
-
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-    const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-    const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-
-    if (diffDays > 0) return `${diffDays}d`;
-    if (diffHours > 0) return `${diffHours}h`;
-    return `${diffMinutes}m`;
-}
-
-function getResourceStatus(resource: any): string {
-    if (resource.status?.phase) return resource.status.phase;
-    if (resource.status?.conditions) {
-        const readyCondition = resource.status.conditions.find((c: any) => c.type === 'Ready');
-        if (readyCondition) return readyCondition.status === 'True' ? 'Ready' : 'NotReady';
-    }
-    if (resource.spec?.replicas !== undefined && resource.status?.readyReplicas !== undefined) {
-        return `${resource.status.readyReplicas}/${resource.spec.replicas}`;
-    }
-    return 'Unknown';
 } 
