@@ -478,7 +478,7 @@ async function streamingSearch(
                         resources,
                         resourceType,
                         namespace,
-                        queryLower,
+                        query, // Pass original query, not queryLower
                         Math.min(10, limit - results.length) // Limit per namespace
                     );
 
@@ -594,17 +594,18 @@ async function quickScanResources(
     resources: any[],
     resourceType: string,
     namespace: string,
-    queryLower: string,
+    query: string, // Changed from queryLower to query
     maxResults: number
 ): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
+    const queryLower = query.toLowerCase(); // Create lowercase version for name matching
 
     for (const resource of resources) {
         if (results.length >= maxResults) break;
 
         const resourceName = resource.metadata.name.toLowerCase();
 
-        // Only exact substring matches in quick scan
+        // Check for exact substring matches in name first
         if (resourceName.includes(queryLower)) {
             results.push({
                 resource,
@@ -614,6 +615,22 @@ async function quickScanResources(
                 matchReason: "exact substring match in name",
                 levenshteinDistance: 0
             });
+            continue;
+        }
+
+        // For services, also check IP addresses in quick scan
+        if (resourceType === 'services' && isIPAddress(query)) {
+            const ipMatch = searchServiceIPs(resource, query);
+            if (ipMatch.found) {
+                results.push({
+                    resource,
+                    resourceType,
+                    namespace,
+                    matchScore: 1.0,
+                    matchReason: `IP match in ${ipMatch.matchedField}`,
+                    levenshteinDistance: 0
+                });
+            }
         }
     }
 
@@ -683,65 +700,78 @@ async function deepSearchResources(
                 });
             }
         } else {
-            // Fuzzy matching with optimizations
-
-            // Quick length check for Levenshtein
-            const lengthDiff = Math.abs(queryLower.length - resourceName.length);
-            if (lengthDiff <= searchConfig.maxDistance) {
-                const distance = levenshteinDistance(queryLower, resourceName);
-                if (distance <= searchConfig.maxDistance) {
-                    const score = 1 - (distance / Math.max(queryLower.length, resourceName.length));
-                    if (score >= searchConfig.minScore) {
-                        matches.push({
-                            score: score * 0.9,
-                            reason: `fuzzy name match (distance: ${distance})`,
-                            distance: distance
-                        });
-                    }
+            // For services, check IP addresses first if query looks like an IP
+            if (resourceType === 'services' && isIPAddress(query)) {
+                const ipMatch = searchServiceIPs(resource, query);
+                if (ipMatch.found) {
+                    matches.push({
+                        score: 1.0,
+                        reason: `IP match in ${ipMatch.matchedField}`,
+                        distance: 0
+                    });
                 }
             }
 
-            // Word boundary matches
-            if (matches.length === 0 && (resourceName.includes('-') || resourceName.includes('_'))) {
-                const words = resourceName.split(/[-_\s]/);
-                for (const word of words) {
-                    if (word.includes(queryLower)) {
-                        matches.push({
-                            score: 0.8,
-                            reason: "word boundary match in name",
-                            distance: 0
-                        });
-                        break;
+            // Fuzzy matching with optimizations (only if no IP match found)
+            if (matches.length === 0) {
+                // Quick length check for Levenshtein
+                const lengthDiff = Math.abs(queryLower.length - resourceName.length);
+                if (lengthDiff <= searchConfig.maxDistance) {
+                    const distance = levenshteinDistance(queryLower, resourceName);
+                    if (distance <= searchConfig.maxDistance) {
+                        const score = 1 - (distance / Math.max(queryLower.length, resourceName.length));
+                        if (score >= searchConfig.minScore) {
+                            matches.push({
+                                score: score * 0.9,
+                                reason: `fuzzy name match (distance: ${distance})`,
+                                distance: distance
+                            });
+                        }
                     }
                 }
-            }
 
-            // Acronym match - only for short queries
-            if (matches.length === 0 && resourceName.includes('-') && queryLower.length <= 4) {
-                const words = resourceName.split('-');
-                if (words.length > 1) {
-                    const acronym = words.map((w: string) => w[0]).join('');
-                    if (acronym.includes(queryLower)) {
-                        matches.push({
-                            score: 0.6,
-                            reason: "acronym match",
-                            distance: 0
-                        });
+                // Word boundary matches
+                if (matches.length === 0 && (resourceName.includes('-') || resourceName.includes('_'))) {
+                    const words = resourceName.split(/[-_\s]/);
+                    for (const word of words) {
+                        if (word.includes(queryLower)) {
+                            matches.push({
+                                score: 0.8,
+                                reason: "word boundary match in name",
+                                distance: 0
+                            });
+                            break;
+                        }
                     }
                 }
-            }
 
-            // Label matching - only if enabled and no name matches
-            if (matches.length === 0 && includeLabels && resource.metadata.labels) {
-                for (const [key, value] of Object.entries(resource.metadata.labels)) {
-                    const labelText = `${key}=${value}`.toLowerCase();
-                    if (labelText.includes(queryLower)) {
-                        matches.push({
-                            score: 0.7,
-                            reason: `label match (${key}=${value})`,
-                            distance: 0
-                        });
-                        break;
+                // Acronym match - only for short queries
+                if (matches.length === 0 && resourceName.includes('-') && queryLower.length <= 4) {
+                    const words = resourceName.split('-');
+                    if (words.length > 1) {
+                        const acronym = words.map((w: string) => w[0]).join('');
+                        if (acronym.includes(queryLower)) {
+                            matches.push({
+                                score: 0.6,
+                                reason: "acronym match",
+                                distance: 0
+                            });
+                        }
+                    }
+                }
+
+                // Label matching - only if enabled and no name matches
+                if (matches.length === 0 && includeLabels && resource.metadata.labels) {
+                    for (const [key, value] of Object.entries(resource.metadata.labels)) {
+                        const labelText = `${key}=${value}`.toLowerCase();
+                        if (labelText.includes(queryLower)) {
+                            matches.push({
+                                score: 0.7,
+                                reason: `label match (${key}=${value})`,
+                                distance: 0
+                            });
+                            break;
+                        }
                     }
                 }
             }
@@ -769,6 +799,62 @@ async function deepSearchResources(
 
 function getFieldValue(obj: any, path: string): any {
     return path.split('.').reduce((current, key) => current?.[key], obj);
+}
+
+export function isIPAddress(query: string): boolean {
+    // IPv4 pattern
+    const ipv4Pattern = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+    // IPv6 pattern (basic)
+    const ipv6Pattern = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^::1$|^::$/;
+
+    return ipv4Pattern.test(query.trim()) || ipv6Pattern.test(query.trim());
+}
+
+export function searchServiceIPs(service: any, query: string): { found: boolean; matchedField: string; matchedValue: string } {
+    const queryLower = query.toLowerCase();
+
+    // Check spec.clusterIP
+    if (service.spec?.clusterIP && service.spec.clusterIP.toLowerCase() === queryLower) {
+        return { found: true, matchedField: 'spec.clusterIP', matchedValue: service.spec.clusterIP };
+    }
+
+    // Check spec.clusterIPs array
+    if (service.spec?.clusterIPs && Array.isArray(service.spec.clusterIPs)) {
+        for (const ip of service.spec.clusterIPs) {
+            if (ip && ip.toLowerCase() === queryLower) {
+                return { found: true, matchedField: 'spec.clusterIPs', matchedValue: ip };
+            }
+        }
+    }
+
+    // Check spec.externalIPs array
+    if (service.spec?.externalIPs && Array.isArray(service.spec.externalIPs)) {
+        for (const ip of service.spec.externalIPs) {
+            if (ip && ip.toLowerCase() === queryLower) {
+                return { found: true, matchedField: 'spec.externalIPs', matchedValue: ip };
+            }
+        }
+    }
+
+    // Check status.loadBalancer.ingress IPs
+    if (service.status?.loadBalancer?.ingress && Array.isArray(service.status.loadBalancer.ingress)) {
+        for (const ingress of service.status.loadBalancer.ingress) {
+            if (ingress.ip && ingress.ip.toLowerCase() === queryLower) {
+                return { found: true, matchedField: 'status.loadBalancer.ingress.ip', matchedValue: ingress.ip };
+            }
+        }
+    }
+
+    // Check for partial IP matches in annotations (sometimes IPs are stored there)
+    if (service.metadata?.annotations) {
+        for (const [key, value] of Object.entries(service.metadata.annotations)) {
+            if (typeof value === 'string' && value.toLowerCase().includes(queryLower)) {
+                return { found: true, matchedField: `annotation.${key}`, matchedValue: value };
+            }
+        }
+    }
+
+    return { found: false, matchedField: '', matchedValue: '' };
 }
 
 function levenshteinDistance(str1: string, str2: string): number {
@@ -837,7 +923,9 @@ function formatSearchResults(
                             matchScore: r.matchScore,
                             matchReason: r.matchReason,
                             age: getResourceAge(r.resource.metadata.creationTimestamp),
-                            status: getResourceStatus(r.resource)
+                            status: getResourceStatus(r.resource),
+                            appLabel: r.resource.metadata.labels?.app || null,
+                            clusterIP: r.resourceType === 'services' ? r.resource.spec?.clusterIP : null
                         }))
                     }, null, 2),
                 },
@@ -873,9 +961,17 @@ function formatSearchResults(
             typeResults.forEach(result => {
                 const score = (result.matchScore * 100).toFixed(0);
                 const age = getResourceAge(result.resource.metadata.creationTimestamp);
+                const appLabel = result.resource.metadata.labels?.app;
+
                 outputText += `  • ${result.resource.metadata.name}`;
                 if (result.resourceType !== "namespace") {
                     outputText += ` (${result.namespace})`;
+                }
+                if (appLabel) {
+                    outputText += ` [app: ${appLabel}]`;
+                }
+                if (result.resourceType === 'services' && result.resource.spec?.clusterIP) {
+                    outputText += ` [IP: ${result.resource.spec.clusterIP}]`;
                 }
                 outputText += ` - ${score}% match, ${age}\n`;
             });
@@ -887,23 +983,36 @@ function formatSearchResults(
             const score = (result.matchScore * 100).toFixed(0);
             const age = getResourceAge(result.resource.metadata.creationTimestamp);
             const status = getResourceStatus(result.resource);
+            const appLabel = result.resource.metadata.labels?.app;
 
             outputText += `${index + 1}. 📋 ${result.resource.metadata.name}\n`;
             outputText += `   Type: ${result.resourceType}\n`;
             if (result.resourceType !== "namespace") {
                 outputText += `   Namespace: ${result.namespace}\n`;
             }
+
+            // Show app label prominently if available
+            if (appLabel) {
+                outputText += `   App: ${appLabel}\n`;
+            }
+
+            // Show cluster IP for services
+            if (result.resourceType === 'services' && result.resource.spec?.clusterIP) {
+                outputText += `   Cluster IP: ${result.resource.spec.clusterIP}\n`;
+            }
+
             outputText += `   Match: ${score}% (${result.matchReason})\n`;
             outputText += `   Status: ${status}\n`;
             outputText += `   Age: ${age}\n`;
 
             if (result.resource.metadata.labels) {
                 const labels = Object.entries(result.resource.metadata.labels)
-                    .slice(0, 3) // Show first 3 labels
+                    .filter(([k, v]) => k !== 'app') // Exclude app label since we show it separately
+                    .slice(0, 3) // Show first 3 remaining labels
                     .map(([k, v]) => `${k}=${v}`)
                     .join(', ');
                 if (labels) {
-                    outputText += `   Labels: ${labels}\n`;
+                    outputText += `   Other Labels: ${labels}\n`;
                 }
             }
             outputText += "\n";
